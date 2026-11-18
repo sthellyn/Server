@@ -107,7 +107,7 @@ jobs:
       - name: Generate idempotent migration SQL
         run: |
           mkdir -p artifacts
-          $HOME/.dotnet/tools/dotnet-ef migrations script --idempotent \
+          "$HOME/.dotnet/tools/dotnet-ef" migrations script --idempotent \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --configuration Release \
@@ -116,7 +116,7 @@ jobs:
 
       - name: Apply every migration to disposable PostgreSQL
         run: |
-          $HOME/.dotnet/tools/dotnet-ef database update \
+          "$HOME/.dotnet/tools/dotnet-ef" database update \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --configuration Release \
@@ -190,7 +190,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EF="$HOME/.dotnet/tools/dotnet-ef"
+          EF=""$HOME/.dotnet/tools/dotnet-ef""
           PROJECT=(--project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build)
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           SELECT 'fixture database ready';
@@ -235,7 +235,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$HOME/.dotnet/tools/dotnet-ef" database update 20260919102416_ItemGroupable --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          ""$HOME/.dotnet/tools/dotnet-ef"" database update 20260919102416_ItemGroupable --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           SELECT "UsagePolicy", COUNT(*) AS row_count
           FROM user_items GROUP BY "UsagePolicy" ORDER BY "UsagePolicy";
@@ -249,7 +249,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EF="$HOME/.dotnet/tools/dotnet-ef"
+          EF=""$HOME/.dotnet/tools/dotnet-ef""
           "$EF" database update 20260927161409_Marketplace --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
@@ -292,7 +292,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EF="$HOME/.dotnet/tools/dotnet-ef"
+          EF=""$HOME/.dotnet/tools/dotnet-ef""
           "$EF" database update 20261004075214_CurrencySeasons --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           INSERT INTO catalog_offers ("Id", "LocalizationId", "PriceInCredits", "ClubLevel", "MaxAmount")
@@ -309,7 +309,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EF="$HOME/.dotnet/tools/dotnet-ef"
+          EF=""$HOME/.dotnet/tools/dotnet-ef""
           "$EF" database update 20261005084336_PermanentSsoTickets --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           INSERT INTO navigator_tabs ("SearchCode", "SortOrder") VALUES ('myworld_view', 2), ('fixture_tab', 9);
@@ -348,7 +348,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EF="$HOME/.dotnet/tools/dotnet-ef"
+          EF=""$HOME/.dotnet/tools/dotnet-ef""
           "$EF" database update --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
           DO $assert$
