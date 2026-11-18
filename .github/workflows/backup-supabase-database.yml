@@ -22,14 +22,41 @@ jobs:
       PGCONNECT_TIMEOUT: "20"
 
     steps:
-      - name: Validate connection and database identity
+      - name: Validate explicit production connection target
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${DATABASE_URL:-}" ]]; then
-            echo "::error::The environment secret SUPABASE_DB_URL is empty or unavailable."
-            exit 1
-          fi
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          raw = os.environ.get("DATABASE_URL", "")
+          if not raw:
+              raise SystemExit("SUPABASE_DB_URL is empty or unavailable")
+          parsed = urlsplit(raw)
+          expected = {
+              "scheme": "postgresql",
+              "hostname": "aws-1-sa-east-1.pooler.supabase.com",
+              "username": "postgres.cslemmvlcfaxupmiswqd",
+              "port": 5432,
+              "path": "/postgres",
+          }
+          actual = {
+              "scheme": parsed.scheme,
+              "hostname": parsed.hostname,
+              "username": parsed.username,
+              "port": parsed.port,
+              "path": parsed.path,
+          }
+          if actual != expected:
+              raise SystemExit("SUPABASE_DB_URL does not match the approved production Session Pooler target")
+          print("Connection target matches the approved Habblover production project.")
+          PY
+
+      - name: Validate database authentication
+        shell: bash
+        run: |
+          set -euo pipefail
           docker run --rm \
             --env DATABASE_URL \
             --env PGSSLMODE \
