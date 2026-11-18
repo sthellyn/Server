@@ -73,7 +73,7 @@ jobs:
           mkdir -p artifacts
           $HOME/.dotnet/tools/dotnet-ef migrations script --idempotent \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
-            --startup-project src/Habbo.Host/Habbo.Host.csproj \
+            --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --configuration Release \
             --no-build \
             --output artifacts/habblover-migrations.sql
@@ -82,7 +82,7 @@ jobs:
         run: |
           $HOME/.dotnet/tools/dotnet-ef database update \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
-            --startup-project src/Habbo.Host/Habbo.Host.csproj \
+            --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --configuration Release \
             --no-build
 
