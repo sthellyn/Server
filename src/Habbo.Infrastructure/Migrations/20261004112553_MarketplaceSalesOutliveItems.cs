@@ -39,6 +39,12 @@ namespace Habbo.Infrastructure.Migrations
                 FROM user_items AS i WHERE i."Id" = o."ItemId";
                 """);
 
+            // The backfill above populates every existing offer. Do not let future
+            // inserts silently inherit 0: every new offer must name its item definition.
+            migrationBuilder.Sql("""
+                ALTER TABLE marketplace_offers ALTER COLUMN "DefinitionId" DROP DEFAULT;
+                """);
+
             // an item on sale twice (two offers made at once) keeps its first offer; the item stays on sale
             migrationBuilder.Sql("""
                 DELETE FROM marketplace_offers AS o
