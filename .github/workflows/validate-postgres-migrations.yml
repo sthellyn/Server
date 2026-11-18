@@ -265,7 +265,7 @@ jobs:
             IF to_regclass('public."OrleansMembershipTable"') IS NULL
                OR to_regclass('public."OrleansMembershipVersionTable"') IS NULL
                OR to_regclass('public."OrleansQuery"') IS NULL
-               OR to_regprocedure('public.update_i_am_alive_time(text,inet,integer,integer,timestamp with time zone)') IS NULL THEN
+               OR to_regprocedure('public.update_i_am_alive_time(character varying,character varying,integer,integer,timestamp with time zone)') IS NULL THEN
               RAISE EXCEPTION 'Orleans clustering tables or function are missing';
             END IF;
           END $$;
