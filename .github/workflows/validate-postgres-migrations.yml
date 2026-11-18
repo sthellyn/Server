@@ -192,9 +192,9 @@ jobs:
           EF="$HOME/.dotnet/tools/dotnet-ef"
           "$EF" database update 20261004075214_CurrencySeasons --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
-          INSERT INTO catalog_offers ("Id", "PageId", "LocalizationId", "PriceInCredits", "ClubLevel", "MaxAmount")
+          INSERT INTO catalog_offers ("Id", "LocalizationId", "PriceInCredits", "ClubLevel", "MaxAmount")
           OVERRIDING SYSTEM VALUE
-          SELECT id, 7001, 'fixture.placeholder.' || id::text, 1, 0, 1
+          SELECT id, 'fixture.placeholder.' || id::text, 1, 0, 1
           FROM generate_series(3000101, 3000110) AS id;
 
           INSERT INTO catalog_page_offers ("PageId", "OfferId", "OrderIndex")
