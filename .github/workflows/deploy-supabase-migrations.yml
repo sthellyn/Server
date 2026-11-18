@@ -150,7 +150,7 @@ jobs:
             exit 1
           fi
           echo "Explicit deployment confirmation accepted."
-          echo "Backup reference supplied: $BACKUP_REFERENCE"
+          echo "Backup/export reference was supplied (value intentionally withheld from logs)."
           echo "::notice::The backup reference is a human attestation only; this workflow does not verify that a backup exists or is restorable."
           echo "::notice::Configure required reviewers for the supabase-production GitHub Environment in repository settings; this approval gate is not created by this YAML file."
 
@@ -160,14 +160,44 @@ jobs:
           PGSSLMODE: require
         run: |
           set -euo pipefail
-          public_objects="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1             --command="SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f');")"
-          history_exists="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1             --command="SELECT (to_regclass('public.\"__EFMigrationsHistory\"') IS NOT NULL)::int;")"
-          echo "Public application relations: $public_objects"
-          echo "EF migration history exists: $history_exists"
-          if [[ "$public_objects" != "0" || "$history_exists" != "0" ]]; then
-            echo "::error::The destination is not an empty initial-deployment database. Stopping without applying migrations."
+          # Treat any application object in public as a non-empty destination.
+          # Includes tables/partitioned tables, views, materialized views, foreign
+          # tables, sequences, routines and standalone user-defined types.
+          object_report="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 <<'SQL'
+          WITH objects AS (
+            SELECT 'relation' AS object_kind, n.nspname || '.' || c.relname AS object_name
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S')
+            UNION ALL
+            SELECT CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END,
+                   n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname='public'
+            UNION ALL
+            SELECT CASE t.typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain'
+                        WHEN 'r' THEN 'range' WHEN 'm' THEN 'multirange' ELSE 'custom type' END,
+                   n.nspname || '.' || t.typname
+            FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+            LEFT JOIN pg_class c ON c.oid=t.typrelid
+            WHERE n.nspname='public'
+              AND t.typtype IN ('e','d','r','m')
+              AND t.typname NOT LIKE '\\_%'
+          )
+          SELECT object_kind || ': ' || object_name FROM objects
+          ORDER BY object_kind, object_name;
+          SQL
+          )"
+          history_exists="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+            --command="SELECT (to_regclass('public.\"__EFMigrationsHistory\"') IS NOT NULL)::int;")"
+          if [[ -n "${object_report//[[:space:]]/}" || "$history_exists" != "0" ]]; then
+            echo "::error::Destination schema public is not empty; found application objects or EF migration history. No migration SQL was executed."
+            if [[ -n "${object_report//[[:space:]]/}" ]]; then
+              echo "$object_report"
+            fi
+            echo "EF migration history exists: $history_exists"
             exit 1
           fi
+          echo "Preflight passed: no public relations, sequences, routines, standalone custom types, or EF migration history found."
 
       - name: Apply the reviewed idempotent SQL to the official Supabase project
         shell: bash
