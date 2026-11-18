@@ -48,6 +48,17 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Reject deployment runs outside the production branch
+        shell: bash
+        env:
+          DEPLOYMENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEPLOYMENT_REF" != "refs/heads/main" ]]; then
+            echo "::error::Production migrations may only be deployed from the main branch."
+            exit 1
+          fi
+
       - name: Validate explicit target and connection identity (no database access)
         shell: bash
         run: |
@@ -69,16 +80,16 @@ jobs:
               raise SystemExit("SUPABASE_DB_URL must be a PostgreSQL URI.")
           username = unquote(u.username or "")
           database = unquote(u.path.lstrip("/"))
-          direct_ok = (
-              u.hostname == f"db.{ref}.supabase.co"
-              and username == "postgres"
-          )
           pooler_ok = (
               u.hostname.endswith(".pooler.supabase.com")
               and username == f"postgres.{ref}"
+              and u.port == 5432
           )
-          if not (direct_ok or pooler_ok):
-              raise SystemExit("Connection URI host and username do not identify the expected Supabase project.")
+          if not pooler_ok:
+              raise SystemExit(
+                  "SUPABASE_DB_URL must use this project's Supabase Session Pooler "
+                  "on port 5432 with username postgres.<project-ref>."
+              )
           if database != "postgres":
               raise SystemExit("SUPABASE_DB_URL must target the postgres database.")
           print("Connection URI host, username and database identify the expected Supabase project; credentials were not displayed.")
