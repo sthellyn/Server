@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       approval_phrase:
-        description: 'Type exactly: APPLY HAB B LOVER PRODUCTION MIGRATIONS'
+        description: 'Type exactly: APPLY HABBLOVER PRODUCTION MIGRATIONS'
         required: true
         type: string
         default: "NO"
@@ -68,13 +68,20 @@ jobs:
           if u.scheme not in ("postgres", "postgresql") or not u.hostname:
               raise SystemExit("SUPABASE_DB_URL must be a PostgreSQL URI.")
           username = unquote(u.username or "")
-          direct_host_ok = u.hostname == f"db.{ref}.supabase.co"
-          pooler_user_ok = username.endswith("." + ref)
-          if not (direct_host_ok or pooler_user_ok):
-              raise SystemExit("Connection URI does not identify the expected Supabase project.")
-          if not u.path or u.path == "/":
-              raise SystemExit("Database name is missing from SUPABASE_DB_URL.")
-          print("Connection URI identifies the expected Supabase project; credentials were not displayed.")
+          database = unquote(u.path.lstrip("/"))
+          direct_ok = (
+              u.hostname == f"db.{ref}.supabase.co"
+              and username == "postgres"
+          )
+          pooler_ok = (
+              u.hostname.endswith(".pooler.supabase.com")
+              and username == f"postgres.{ref}"
+          )
+          if not (direct_ok or pooler_ok):
+              raise SystemExit("Connection URI host and username do not identify the expected Supabase project.")
+          if database != "postgres":
+              raise SystemExit("SUPABASE_DB_URL must target the postgres database.")
+          print("Connection URI host, username and database identify the expected Supabase project; credentials were not displayed.")
           PY
 
       - name: Set up .NET 10 and PostgreSQL client
@@ -118,6 +125,7 @@ jobs:
           def quote(v):
               return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
           conn = ";".join(f"{k}={quote(v)}" for k, v in values.items())
+          print("::add-mask::" + conn)
           print("HABBO_CONNECTIONSTRING=" + conn)
           PY
           "$HOME/.dotnet/tools/dotnet-ef" migrations script --idempotent             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj             --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj             --configuration Release --no-build             --output artifacts/habblover-migrations.sql
@@ -136,12 +144,15 @@ jobs:
             echo "::error::A backup/export reference is required. No database SQL was executed."
             exit 1
           fi
-          required="APPLY HAB B LOVER PRODUCTION MIGRATIONS"
+          required="APPLY HABBLOVER PRODUCTION MIGRATIONS"
           if [[ "$APPROVAL_PHRASE" != "$required" ]]; then
             echo "::error::Confirmation phrase did not match. No database SQL was executed."
             exit 1
           fi
           echo "Explicit deployment confirmation accepted."
+          echo "Backup reference supplied: $BACKUP_REFERENCE"
+          echo "::notice::The backup reference is a human attestation only; this workflow does not verify that a backup exists or is restorable."
+          echo "::notice::Configure required reviewers for the supabase-production GitHub Environment in repository settings; this approval gate is not created by this YAML file."
 
       - name: Verify the target database is empty (read-only)
         shell: bash
@@ -205,15 +216,25 @@ jobs:
 
             SELECT COUNT(*) INTO definition_fk_count
             FROM pg_constraint con
-            JOIN pg_class rel ON rel.oid=con.conrelid
-            JOIN pg_namespace ns ON ns.oid=rel.relnamespace
-            WHERE ns.nspname='public' AND rel.relname='marketplace_offers'
-              AND con.contype='f' AND con.conkey @> ARRAY[
+            JOIN pg_class source_rel ON source_rel.oid=con.conrelid
+            JOIN pg_namespace source_ns ON source_ns.oid=source_rel.relnamespace
+            JOIN pg_class target_rel ON target_rel.oid=con.confrelid
+            JOIN pg_namespace target_ns ON target_ns.oid=target_rel.relnamespace
+            WHERE source_ns.nspname='public'
+              AND source_rel.relname='marketplace_offers'
+              AND target_ns.nspname='public'
+              AND target_rel.relname='item_definitions'
+              AND con.contype='f'
+              AND con.conkey = ARRAY[
                 (SELECT attnum FROM pg_attribute
-                 WHERE attrelid=rel.oid AND attname='DefinitionId' AND NOT attisdropped)
+                 WHERE attrelid=source_rel.oid AND attname='DefinitionId' AND NOT attisdropped)
+              ]::smallint[]
+              AND con.confkey = ARRAY[
+                (SELECT attnum FROM pg_attribute
+                 WHERE attrelid=target_rel.oid AND attname='Id' AND NOT attisdropped)
               ]::smallint[];
-            IF definition_fk_count < 1 THEN
-              RAISE EXCEPTION 'DefinitionId foreign key is missing';
+            IF definition_fk_count <> 1 THEN
+              RAISE EXCEPTION 'Expected exactly one DefinitionId -> item_definitions.Id foreign key, found %', definition_fk_count;
             END IF;
 
             IF EXISTS (
