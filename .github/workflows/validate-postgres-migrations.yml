@@ -315,7 +315,7 @@ jobs:
           EF="$HOME/.dotnet/tools/dotnet-ef"
           "$EF" database update --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
           psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
-          DO $assert$$
+          DO $assert$
           BEGIN
             IF (SELECT count(*) FROM furni_states WHERE "ItemId" = 700001 AND "State" = 'fixture-state-42') <> 1 THEN
               RAISE EXCEPTION 'ExtraData was not preserved in furni_states';
