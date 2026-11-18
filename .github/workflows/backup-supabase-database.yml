@@ -1,0 +1,76 @@
+name: Backup Supabase Database
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: habblo-supabase-database-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Create read-only PostgreSQL backup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "20"
+
+    steps:
+      - name: Validate connection and database identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DATABASE_URL:-}" ]]; then
+            echo "::error::The environment secret SUPABASE_DB_URL is empty or unavailable."
+            exit 1
+          fi
+          docker run --rm \
+            --env DATABASE_URL \
+            --env PGSSLMODE \
+            --env PGCONNECT_TIMEOUT \
+            postgres:17-alpine \
+            sh -ceu 'psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT current_database() || chr(10) || current_user || chr(10) || current_setting('''server_version''');"'
+
+      - name: Create and verify custom-format dump
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup_dir="$RUNNER_TEMP/habblover-backup"
+          mkdir -p "$backup_dir"
+          chmod 700 "$backup_dir"
+
+          docker run --rm \
+            --env DATABASE_URL \
+            --env PGSSLMODE \
+            --env PGCONNECT_TIMEOUT \
+            --volume "$backup_dir:/backup" \
+            postgres:17-alpine \
+            sh -ceu '
+              pg_dump --dbname="$DATABASE_URL" --format=custom --no-owner --no-acl --file=/backup/habblover-supabase.dump
+              test -s /backup/habblover-supabase.dump
+              pg_restore --list /backup/habblover-supabase.dump > /backup/archive-contents.txt
+              test -s /backup/archive-contents.txt
+            '
+
+          (
+            cd "$backup_dir"
+            sha256sum habblover-supabase.dump > SHA256SUMS.txt
+            stat --printf='Backup size: %s bytes\n' habblover-supabase.dump
+            cat SHA256SUMS.txt
+          )
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: habblo-supabase-backup
+          path: |
+            ${{ runner.temp }}/habblover-backup/habblover-supabase.dump
+            ${{ runner.temp }}/habblover-backup/archive-contents.txt
+            ${{ runner.temp }}/habblover-backup/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
