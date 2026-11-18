@@ -1,0 +1,108 @@
+name: Validate PostgreSQL migrations
+
+on:
+  push:
+    branches:
+      - main
+      - "chore/**"
+    paths:
+      - ".github/workflows/validate-postgres-migrations.yml"
+      - "src/Habbo.Infrastructure/**"
+      - "src/Habbo.Host/**"
+      - "src/Habbo.Domain/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/validate-postgres-migrations.yml"
+      - "src/Habbo.Infrastructure/**"
+      - "src/Habbo.Host/**"
+      - "src/Habbo.Domain/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-migrations:
+    name: Build and apply migrations to disposable PostgreSQL 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: habblo_verification
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d habblo_verification"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      HABBO_CONNECTIONSTRING: Host=localhost;Port=5432;Database=habblo_verification;Username=postgres;Password=postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore src/Habbo.Host/Habbo.Host.csproj
+
+      - name: Build server
+        run: dotnet build src/Habbo.Host/Habbo.Host.csproj --configuration Release --no-restore
+
+      - name: Install matching EF Core CLI
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.12
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Generate idempotent migration SQL
+        run: |
+          mkdir -p artifacts
+          dotnet ef migrations script --idempotent \
+            --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --startup-project src/Habbo.Host/Habbo.Host.csproj \
+            --configuration Release \
+            --no-build \
+            --output artifacts/habblover-migrations.sql
+
+      - name: Apply every migration to disposable PostgreSQL
+        run: |
+          dotnet ef database update \
+            --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --startup-project src/Habbo.Host/Habbo.Host.csproj \
+            --configuration Release \
+            --no-build
+
+      - name: Verify migration history
+        shell: bash
+        run: |
+          applied="$(psql "host=localhost port=5432 dbname=habblo_verification user=postgres" \
+            --no-psqlrc --tuples-only --no-align \
+            --command='SELECT COUNT(*) FROM public."__EFMigrationsHistory";')"
+          echo "Applied migrations: $applied"
+          if [[ "$applied" -ne 112 ]]; then
+            echo "::error::Expected 112 applied migrations, but found $applied."
+            exit 1
+          fi
+
+      - name: Upload reviewed SQL script
+        if: always() && hashFiles('artifacts/habblover-migrations.sql') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: habblo-ver-migrations-sql
+          path: artifacts/habblover-migrations.sql
+          if-no-files-found: error
+          retention-days: 14
