@@ -14,6 +14,7 @@ jobs:
   backup:
     name: Create read-only PostgreSQL backup
     runs-on: ubuntu-24.04
+    environment: supabase-production
     timeout-minutes: 30
     env:
       DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -34,7 +35,7 @@ jobs:
             --env PGSSLMODE \
             --env PGCONNECT_TIMEOUT \
             postgres:17-alpine \
-            sh -ceu 'psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT current_database() || chr(10) || current_user || chr(10) || current_setting('''server_version''');"'
+            sh -ceu 'psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "SELECT current_database(), current_user;"'
 
       - name: Create and verify custom-format dump
         shell: bash
