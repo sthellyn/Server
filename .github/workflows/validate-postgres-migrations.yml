@@ -71,7 +71,7 @@ jobs:
       - name: Generate idempotent migration SQL
         run: |
           mkdir -p artifacts
-          dotnet ef migrations script --idempotent \
+          dotnet-ef migrations script --idempotent \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --startup-project src/Habbo.Host/Habbo.Host.csproj \
             --configuration Release \
@@ -80,7 +80,7 @@ jobs:
 
       - name: Apply every migration to disposable PostgreSQL
         run: |
-          dotnet ef database update \
+          dotnet-ef database update \
             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
             --startup-project src/Habbo.Host/Habbo.Host.csproj \
             --configuration Release \
