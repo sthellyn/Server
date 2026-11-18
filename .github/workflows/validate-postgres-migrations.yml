@@ -98,6 +98,15 @@ jobs:
             exit 1
           fi
 
+      - name: Upload generated SQL script
+        if: always() && hashFiles('artifacts/habblover-migrations.sql') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: habblo-ver-migrations-sql
+          path: artifacts/habblover-migrations.sql
+          if-no-files-found: error
+          retention-days: 14
+
   validate-destructive-migrations:
     name: Verify destructive migrations preserve or remove only expected fixture data
     runs-on: ubuntu-latest
@@ -275,12 +284,3 @@ jobs:
             END IF;
           END $$;
           SQL
-
-      - name: Upload reviewed SQL script
-        if: always() && hashFiles('artifacts/habblover-migrations.sql') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: habblo-ver-migrations-sql
-          path: artifacts/habblover-migrations.sql
-          if-no-files-found: error
-          retention-days: 14
