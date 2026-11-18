@@ -221,7 +221,6 @@ jobs:
           VALUES
             (900001, '10000000-0000-0000-0000-000000000001', 700001, 20, 18, now(), now() + interval '1 day', false),
             (900002, '10000000-0000-0000-0000-000000000001', 700001, 25, 22, now(), now() + interval '1 day', false);
-          SQL
           SELECT 'Marketplace preflight C/G';
           SELECT o."Id" AS offer_id, o."ItemId"
           FROM marketplace_offers o LEFT JOIN user_items i ON i."Id" = o."ItemId"
@@ -250,6 +249,8 @@ jobs:
           SELECT o."Id" AS offer_id, o."ItemId", i."InMarketplace"
           FROM marketplace_offers o JOIN user_items i ON i."Id" = o."ItemId"
           WHERE o."SoldAt" IS NULL AND i."InMarketplace" IS NOT TRUE ORDER BY o."Id";
+          SQL
+
 
       - name: Create placeholder-gift fixtures before their retirement migration
         shell: bash
@@ -282,7 +283,6 @@ jobs:
             ('fixture_view', 'keep_me', 'custom block', 'all', 0, 0, 10, false, 2);
           INSERT INTO navigator_quick_links ("TabSearchCode", "SearchCode", "Filter", "Localization", "SortOrder")
           VALUES ('myworld_view', 'fixture_saved_search', '', 'fixture.saved', 1);
-          SQL
           SELECT 'Navigator and category preflight D/F';
           SELECT "Category", COUNT(*) AS definition_count
           FROM item_definitions GROUP BY "Category" ORDER BY "Category";
@@ -305,6 +305,8 @@ jobs:
             ('myworld_view', 'my_rooms'), ('my_rooms', 'my_rooms'), ('favorites', 'favorites'))
           GROUP BY "RequestCode", "BlockCode" ORDER BY "RequestCode", "BlockCode";
           SELECT "SearchCode", "SortOrder" FROM navigator_tabs WHERE "SearchCode" = 'myworld_view';
+          SQL
+
 
       - name: Apply remaining migrations and assert fixture outcomes
         shell: bash
