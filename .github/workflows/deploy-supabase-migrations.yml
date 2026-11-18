@@ -167,7 +167,7 @@ jobs:
           WITH objects AS (
             SELECT 'relation' AS object_kind, n.nspname || '.' || c.relname AS object_name
             FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S')
+            WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S','c')
             UNION ALL
             SELECT CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END,
                    n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
