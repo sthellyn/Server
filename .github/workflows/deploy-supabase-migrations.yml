@@ -8,6 +8,10 @@ on:
         required: true
         type: string
         default: "cslemmvlcfaxupmiswqd"
+      backup_reference:
+        description: "Reference for the completed pre-deployment backup/export (ticket or secure storage reference)"
+        required: true
+        type: string
       approval_phrase:
         description: 'Type exactly: APPLY HAB B LOVER PRODUCTION MIGRATIONS'
         required: true
@@ -35,6 +39,7 @@ jobs:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       TARGET_PROJECT_REF: ${{ inputs.target_project_ref }}
       APPROVAL_PHRASE: ${{ inputs.approval_phrase }}
+      BACKUP_REFERENCE: ${{ inputs.backup_reference }}
 
     steps:
       - name: Check out the reviewed commit
@@ -127,6 +132,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "${BACKUP_REFERENCE//[[:space:]]/}" ]]; then
+            echo "::error::A backup/export reference is required. No database SQL was executed."
+            exit 1
+          fi
           required="APPLY HAB B LOVER PRODUCTION MIGRATIONS"
           if [[ "$APPROVAL_PHRASE" != "$required" ]]; then
             echo "::error::Confirmation phrase did not match. No database SQL was executed."
