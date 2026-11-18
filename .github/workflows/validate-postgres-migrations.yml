@@ -1,0 +1,437 @@
+name: Validate PostgreSQL migrations
+
+on:
+  push:
+    branches:
+      - main
+      - "chore/**"
+    paths:
+      - ".github/workflows/validate-postgres-migrations.yml"
+      - ".github/workflows/deploy-supabase-migrations.yml"
+      - "src/Habbo.Infrastructure/**"
+      - "src/Habbo.Host/**"
+      - "src/Habbo.Domain/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/validate-postgres-migrations.yml"
+      - ".github/workflows/deploy-supabase-migrations.yml"
+      - "src/Habbo.Infrastructure/**"
+      - "src/Habbo.Host/**"
+      - "src/Habbo.Domain/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-deployment-workflow:
+    name: Parse guarded deployment workflow without secrets or database access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Go for pinned actionlint
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+          cache: false
+
+      - name: Install pinned actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Validate both workflows with actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          actionlint -color .github/workflows/deploy-supabase-migrations.yml .github/workflows/validate-postgres-migrations.yml
+
+      - name: Parse deployment workflow YAML as an additional syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/deploy-supabase-migrations.yml"); puts "Deployment workflow YAML parsed successfully."'
+
+  validate-migrations:
+    name: Build and apply migrations to disposable PostgreSQL 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: habblo_verification
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d habblo_verification"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      HABBO_CONNECTIONSTRING: Host=localhost;Port=5432;Database=habblo_verification;Username=postgres;Password=postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore src/Habbo.Host/Habbo.Host.csproj
+
+      - name: Build server
+        run: dotnet build src/Habbo.Host/Habbo.Host.csproj --configuration Release --no-restore
+
+      - name: Install matching EF Core CLI
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.12
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Generate idempotent migration SQL
+        run: |
+          mkdir -p artifacts
+          "$HOME/.dotnet/tools/dotnet-ef" migrations script --idempotent \
+            --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --configuration Release \
+            --no-build \
+            --output artifacts/habblover-migrations.sql
+
+      - name: Apply every migration to disposable PostgreSQL
+        run: |
+          "$HOME/.dotnet/tools/dotnet-ef" database update \
+            --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj \
+            --configuration Release \
+            --no-build
+
+      - name: Verify migration history
+        shell: bash
+        run: |
+          applied="$(psql "host=localhost port=5432 dbname=habblo_verification user=postgres" \
+            --no-psqlrc --tuples-only --no-align \
+            --command='SELECT COUNT(*) FROM public."__EFMigrationsHistory";')"
+          echo "Applied migrations: $applied"
+          if [[ "$applied" -ne 112 ]]; then
+            echo "::error::Expected 112 applied migrations, but found $applied."
+            exit 1
+          fi
+
+      - name: Upload generated SQL script
+        if: always() && hashFiles('artifacts/habblover-migrations.sql') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: habblo-ver-migrations-sql
+          path: artifacts/habblover-migrations.sql
+          if-no-files-found: error
+          retention-days: 14
+
+  validate-destructive-migrations:
+    name: Verify destructive migrations preserve or remove only expected fixture data
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      postgres-fixtures:
+        image: postgres:17
+        env:
+          POSTGRES_DB: habblo_data_verification
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d habblo_data_verification"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      HABBO_CONNECTIONSTRING: Host=localhost;Port=5432;Database=habblo_data_verification;Username=postgres;Password=postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore and build
+        run: |
+          dotnet restore src/Habbo.Host/Habbo.Host.csproj
+          dotnet build src/Habbo.Host/Habbo.Host.csproj --configuration Release --no-restore
+
+      - name: Install matching EF Core CLI
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.12
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Apply baseline migrations and insert synthetic records
+        shell: bash
+        run: |
+          set -euo pipefail
+          EF="$HOME/.dotnet/tools/dotnet-ef"
+          PROJECT=(--project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build)
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'fixture database ready';
+          SQL
+          "$EF" database update 20260919100234_Catalog "${PROJECT[@]}"
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO users ("Id", "Username", "PasswordHash", "Figure", "Sex", "Motto", "Credits", "Rank", "CreatedAt")
+          VALUES ('10000000-0000-0000-0000-000000000001', 'fixture_owner', 'not-a-real-password-hash', 'hd-180-1', 'M', 'synthetic fixture', 100, 1, now());
+
+          INSERT INTO item_definitions ("Id", "ClassName", "Type", "XDim", "YDim", "StackHeight", "CanWalk", "CanSit", "CanLay")
+          VALUES (7001, 'fixture_item', 1, 1, 1, 0.0, false, false, false);
+
+          INSERT INTO user_items ("Id", "OwnerId", "DefinitionId", "ExtraData")
+          OVERRIDING SYSTEM VALUE
+          VALUES (700001, '10000000-0000-0000-0000-000000000001', 7001, 'fixture-state-42');
+
+          INSERT INTO catalog_pages ("Id", "PageName", "Localization", "Icon", "Visible", "LayoutCode", "Images", "Texts", "MinRank", "OrderIndex")
+          OVERRIDING SYSTEM VALUE
+          VALUES (7001, 'fixture_page', 'fixture.page', 1, true, 'default_3x3', ARRAY[]::text[], ARRAY[]::text[], 0, 1);
+
+          INSERT INTO catalog_offers ("Id", "PageId", "LocalizationId", "PriceInCredits", "ClubLevel", "MaxAmount")
+          OVERRIDING SYSTEM VALUE
+          VALUES (800001, 7001, 'fixture.offer', 10, 0, 1);
+          SQL
+
+      - name: Run preflight queries A and E before destructive migrations
+        shell: bash
+        run: |
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT "DefinitionId", "Groupable", COUNT(*) AS item_count
+          FROM user_items GROUP BY "DefinitionId", "Groupable" ORDER BY "DefinitionId", "Groupable";
+          SELECT COUNT(*) AS total_user_items,
+                 COUNT(*) FILTER (WHERE "Groupable" IS TRUE) AS groupable_true,
+                 COUNT(*) FILTER (WHERE "Groupable" IS FALSE) AS groupable_false
+          FROM user_items;
+          SELECT LOWER("Username") AS normalized_username, COUNT(*) AS account_count,
+                 ARRAY_AGG("Username" ORDER BY "Username") AS usernames
+          FROM users GROUP BY LOWER("Username") HAVING COUNT(*) > 1;
+          SQL
+
+      - name: Run preflight query B before UsagePolicy is dropped
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HOME/.dotnet/tools/dotnet-ef" database update 20260919102416_ItemGroupable --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT "UsagePolicy", COUNT(*) AS row_count
+          FROM user_items GROUP BY "UsagePolicy" ORDER BY "UsagePolicy";
+          SELECT COUNT(*) AS total_user_items,
+                 COUNT(*) FILTER (WHERE "UsagePolicy" <> 0) AS nonzero_usage_policy,
+                 COUNT(*) FILTER (WHERE "UsagePolicy" = 0) AS zero_usage_policy
+          FROM user_items;
+          SQL
+
+      - name: Create marketplace fixtures before marketplace cleanup migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          EF="$HOME/.dotnet/tools/dotnet-ef"
+          "$EF" database update 20260927161409_Marketplace --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
+          OVERRIDING SYSTEM VALUE
+          VALUES
+            (900001, '10000000-0000-0000-0000-000000000001', 700001, 20, 18, now(), now() + interval '1 day', false),
+            (900002, '10000000-0000-0000-0000-000000000001', 700001, 25, 22, now(), now() + interval '1 day', false);
+          SELECT 'Marketplace preflight C/G';
+          SELECT o."Id" AS offer_id, o."ItemId"
+          FROM marketplace_offers o LEFT JOIN user_items i ON i."Id" = o."ItemId"
+          WHERE i."Id" IS NULL ORDER BY o."Id";
+          SELECT o."ItemId", COUNT(*) AS open_offer_count, MIN(o."Id") AS kept_offer_id,
+                 ARRAY_AGG(o."Id" ORDER BY o."Id") AS offer_ids
+          FROM marketplace_offers o WHERE o."SoldAt" IS NULL
+          GROUP BY o."ItemId" HAVING COUNT(*) > 1 ORDER BY o."ItemId";
+          SELECT COUNT(*) AS open_duplicate_rows_that_migration_would_delete
+          FROM marketplace_offers o
+          WHERE o."SoldAt" IS NULL AND EXISTS (
+            SELECT 1 FROM marketplace_offers e
+            WHERE e."ItemId" = o."ItemId" AND e."SoldAt" IS NULL AND e."Id" < o."Id");
+          SELECT o."Id" AS offer_id, o."ItemId", i."DefinitionId"
+          FROM marketplace_offers o JOIN user_items i ON i."Id" = o."ItemId"
+          LEFT JOIN item_definitions d ON d."Id" = i."DefinitionId"
+          WHERE d."Id" IS NULL ORDER BY o."Id";
+          SELECT COUNT(*) AS total_offers,
+                 COUNT(*) FILTER (WHERE o."SoldAt" IS NULL) AS unsold_offers,
+                 COUNT(*) FILTER (WHERE o."SoldAt" IS NOT NULL) AS sold_offers,
+                 COUNT(*) FILTER (WHERE i."Id" IS NULL) AS offers_without_matching_item
+          FROM marketplace_offers o LEFT JOIN user_items i ON i."Id" = o."ItemId";
+          SELECT COUNT(*) FILTER (WHERE i."InMarketplace" IS TRUE) AS items_marked_in_marketplace,
+                 COUNT(*) FILTER (WHERE i."InMarketplace" IS FALSE) AS items_not_marked_in_marketplace
+          FROM user_items i;
+          SELECT o."Id" AS offer_id, o."ItemId", i."InMarketplace"
+          FROM marketplace_offers o JOIN user_items i ON i."Id" = o."ItemId"
+          WHERE o."SoldAt" IS NULL AND i."InMarketplace" IS NOT TRUE ORDER BY o."Id";
+          SQL
+
+
+      - name: Create placeholder-gift fixtures before their retirement migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          EF="$HOME/.dotnet/tools/dotnet-ef"
+          "$EF" database update 20261004075214_CurrencySeasons --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO catalog_offers ("Id", "LocalizationId", "PriceInCredits", "ClubLevel", "MaxAmount")
+          OVERRIDING SYSTEM VALUE
+          SELECT id, 'fixture.placeholder.' || id::text, 1, 0, 1
+          FROM generate_series(3000101, 3000110) AS id;
+
+          INSERT INTO catalog_page_offers ("PageId", "OfferId", "OrderIndex")
+          SELECT 7001, id, id - 3000100
+          FROM generate_series(3000101, 3000110) AS id;
+          SQL
+
+      - name: Create navigator fixtures before navigator replacement migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          EF="$HOME/.dotnet/tools/dotnet-ef"
+          "$EF" database update 20261005084336_PermanentSsoTickets --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO navigator_tabs ("SearchCode", "SortOrder") VALUES ('myworld_view', 2), ('fixture_tab', 9);
+          INSERT INTO navigator_blocks ("RequestCode", "BlockCode", "Text", "Query", "ActionAllowed", "ViewMode", "MaxResults", "ForceClosed", "SortOrder")
+          VALUES
+            ('official_view', 'official_view', 'old default', 'all', 0, 0, 10, false, 1),
+            ('fixture_view', 'keep_me', 'custom block', 'all', 0, 0, 10, false, 2);
+          INSERT INTO navigator_quick_links ("TabSearchCode", "SearchCode", "Filter", "Localization", "SortOrder")
+          VALUES ('myworld_view', 'fixture_saved_search', '', 'fixture.saved', 1);
+          SELECT 'Navigator and category preflight D/F';
+          SELECT "Category", COUNT(*) AS definition_count
+          FROM item_definitions GROUP BY "Category" ORDER BY "Category";
+          SELECT "Category", COUNT(*) AS user_item_count
+          FROM user_items GROUP BY "Category" ORDER BY "Category";
+          SELECT COUNT(*) AS definitions_total,
+                 COUNT(*) FILTER (WHERE "Category" <> 0) AS definitions_nonzero_category
+          FROM item_definitions;
+          SELECT COUNT(*) AS user_items_total,
+                 COUNT(*) FILTER (WHERE "Category" <> 0) AS user_items_nonzero_category
+          FROM user_items;
+          SELECT COUNT(*) AS all_quick_links_to_be_deleted FROM navigator_quick_links;
+          SELECT "TabSearchCode", COUNT(*) AS quick_link_count,
+                 ARRAY_AGG("SearchCode" ORDER BY "SortOrder", "SearchCode") AS quick_links
+          FROM navigator_quick_links GROUP BY "TabSearchCode" ORDER BY "TabSearchCode";
+          SELECT "RequestCode", "BlockCode", COUNT(*) AS row_count
+          FROM navigator_blocks
+          WHERE ("RequestCode", "BlockCode") IN (
+            ('official_view', 'official_view'), ('hotel_view', 'popular'), ('popular', 'popular'),
+            ('myworld_view', 'my_rooms'), ('my_rooms', 'my_rooms'), ('favorites', 'favorites'))
+          GROUP BY "RequestCode", "BlockCode" ORDER BY "RequestCode", "BlockCode";
+          SELECT "SearchCode", "SortOrder" FROM navigator_tabs WHERE "SearchCode" = 'myworld_view';
+          SQL
+
+
+      - name: Apply remaining migrations and assert fixture outcomes
+        shell: bash
+        run: |
+          set -euo pipefail
+          EF="$HOME/.dotnet/tools/dotnet-ef"
+          "$EF" database update --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $assert$
+          BEGIN
+            IF (SELECT count(*) FROM furni_states WHERE "ItemId" = 700001 AND "State" = 'fixture-state-42') <> 1 THEN
+              RAISE EXCEPTION 'ExtraData was not preserved in furni_states';
+            END IF;
+            IF (SELECT "Groupable" FROM item_definitions WHERE "Id" = 7001) IS DISTINCT FROM true THEN
+              RAISE EXCEPTION 'Groupable did not move to item_definitions with expected default';
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='user_items' AND column_name IN ('ExtraData','UsagePolicy','Category','Groupable')) THEN
+              RAISE EXCEPTION 'A retired user_items column still exists';
+            END IF;
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='item_definitions' AND column_name='Category') THEN
+              RAISE EXCEPTION 'Retired item_definitions.Category still exists';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM catalog_page_offers WHERE "PageId"=7001 AND "OfferId"=800001) THEN
+              RAISE EXCEPTION 'Existing catalog page-offer link was not preserved';
+            END IF;
+            IF (SELECT count(*) FROM marketplace_offers WHERE "ItemId"=700001 AND "SoldAt" IS NULL) <> 1
+               OR NOT EXISTS (SELECT 1 FROM marketplace_offers WHERE "Id"=900001 AND "DefinitionId"=7001) THEN
+              RAISE EXCEPTION 'Marketplace duplicate cleanup or DefinitionId backfill failed';
+            END IF;
+            IF EXISTS (SELECT 1 FROM catalog_page_offers WHERE "OfferId" BETWEEN 3000101 AND 3000110) THEN
+              RAISE EXCEPTION 'Placeholder gift page links were not removed';
+            END IF;
+            IF (SELECT count(*) FROM catalog_offers WHERE "Id" BETWEEN 3000101 AND 3000110) <> 10 THEN
+              RAISE EXCEPTION 'Placeholder gift offers themselves were unexpectedly deleted';
+            END IF;
+            IF EXISTS (SELECT 1 FROM navigator_blocks WHERE "RequestCode"='official_view' AND "BlockCode"='official_view')
+               OR NOT EXISTS (SELECT 1 FROM navigator_blocks WHERE "RequestCode"='fixture_view' AND "BlockCode"='keep_me') THEN
+              RAISE EXCEPTION 'Navigator block cleanup removed wrong rows or retained retired rows';
+            END IF;
+            IF (SELECT count(*) FROM navigator_quick_links) <> 0 THEN
+              RAISE EXCEPTION 'Navigator quick links were not cleared as specified';
+            END IF;
+            IF (SELECT "SortOrder" FROM navigator_tabs WHERE "SearchCode"='myworld_view') <> 4 THEN
+              RAISE EXCEPTION 'Navigator My World tab order was not updated';
+            END IF;
+            -- PostgreSQL folds unquoted Orleans identifiers to lowercase.
+            IF to_regclass('public.orleansmembershiptable') IS NULL
+               OR to_regclass('public.orleansmembershipversiontable') IS NULL
+               OR to_regclass('public.orleansquery') IS NULL
+               OR NOT EXISTS (
+                 SELECT 1 FROM pg_proc p
+                 JOIN pg_namespace n ON n.oid = p.pronamespace
+                 WHERE n.nspname = 'public' AND p.proname = 'update_i_am_alive_time'
+               ) THEN
+              RAISE EXCEPTION 'Orleans clustering tables or function are missing';
+            END IF;
+          END $assert$;
+          SQL
+
+      - name: Verify Marketplace DefinitionId cannot default to zero
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $assert$
+          DECLARE default_expr text;
+          BEGIN
+            SELECT column_default INTO default_expr
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='marketplace_offers' AND column_name='DefinitionId';
+            IF default_expr IS NOT NULL THEN
+              RAISE EXCEPTION 'DefinitionId still has a database default: %', default_expr;
+            END IF;
+
+            BEGIN
+              INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
+              OVERRIDING SYSTEM VALUE
+              VALUES (900003, '10000000-0000-0000-0000-000000000001', NULL, 10, 9, now(), now() + interval '1 day', false);
+              RAISE EXCEPTION 'Offer without DefinitionId unexpectedly succeeded';
+            EXCEPTION WHEN not_null_violation THEN
+              RAISE NOTICE 'PASS: omitted DefinitionId is rejected';
+            END;
+
+            INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "DefinitionId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
+            OVERRIDING SYSTEM VALUE
+            VALUES (900004, '10000000-0000-0000-0000-000000000001', NULL, 7001, 10, 9, now(), now() + interval '1 day', false);
+
+            IF NOT EXISTS (SELECT 1 FROM marketplace_offers WHERE "Id"=900004 AND "DefinitionId"=7001) THEN
+              RAISE EXCEPTION 'Explicit DefinitionId insert was not preserved';
+            END IF;
+          END $assert$;
+          SQL

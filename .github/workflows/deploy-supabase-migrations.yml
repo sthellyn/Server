@@ -1,0 +1,298 @@
+name: Manual Supabase production migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_project_ref:
+        description: "Must be the official Supabase project ref"
+        required: true
+        type: string
+        default: "cslemmvlcfaxupmiswqd"
+      backup_reference:
+        description: "Reference for the completed pre-deployment backup/export (ticket or secure storage reference)"
+        required: true
+        type: string
+      approval_phrase:
+        description: 'Type exactly: APPLY HABBLOVER PRODUCTION MIGRATIONS'
+        required: true
+        type: string
+        default: "NO"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: habblo-supabase-production-migrations
+  cancel-in-progress: false
+
+jobs:
+  deploy-migrations:
+    name: Verify destination, require confirmation, then apply migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: supabase-production
+
+    env:
+      EXPECTED_PROJECT_REF: cslemmvlcfaxupmiswqd
+      EXPECTED_SQL_SHA256: ca2d598e79c08996e1f88a51478487bad912b69bcaa06a92dc23690bb5c7f7c2
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      TARGET_PROJECT_REF: ${{ inputs.target_project_ref }}
+      APPROVAL_PHRASE: ${{ inputs.approval_phrase }}
+      BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+
+    steps:
+      - name: Check out the reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reject deployment runs outside the production branch
+        shell: bash
+        env:
+          DEPLOYMENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DEPLOYMENT_REF" != "refs/heads/main" ]]; then
+            echo "::error::Production migrations may only be deployed from the main branch."
+            exit 1
+          fi
+
+      - name: Validate explicit target and connection identity (no database access)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_PROJECT_REF" != "$EXPECTED_PROJECT_REF" ]]; then
+            echo "::error::Target project ref does not match the approved Supabase project."
+            exit 1
+          fi
+          if [[ -z "${SUPABASE_DB_URL:-}" ]]; then
+            echo "::error::Repository secret SUPABASE_DB_URL is not configured."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit, unquote
+          ref = os.environ["EXPECTED_PROJECT_REF"]
+          u = urlsplit(os.environ["SUPABASE_DB_URL"])
+          if u.scheme not in ("postgres", "postgresql") or not u.hostname:
+              raise SystemExit("SUPABASE_DB_URL must be a PostgreSQL URI.")
+          username = unquote(u.username or "")
+          database = unquote(u.path.lstrip("/"))
+          pooler_ok = (
+              u.hostname.endswith(".pooler.supabase.com")
+              and username == f"postgres.{ref}"
+              and u.port == 5432
+          )
+          if not pooler_ok:
+              raise SystemExit(
+                  "SUPABASE_DB_URL must use this project's Supabase Session Pooler "
+                  "on port 5432 with username postgres.<project-ref>."
+              )
+          if database != "postgres":
+              raise SystemExit("SUPABASE_DB_URL must target the postgres database.")
+          print("Connection URI host, username and database identify the expected Supabase project; credentials were not displayed.")
+          PY
+
+      - name: Set up .NET 10 and PostgreSQL client
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Restore and build the reviewed server
+        run: |
+          dotnet restore src/Habbo.Host/Habbo.Host.csproj
+          dotnet build src/Habbo.Host/Habbo.Host.csproj --configuration Release --no-restore
+
+      - name: Install matching EF Core CLI
+        run: |
+          dotnet tool install --global dotnet-ef --version 10.0.12
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Generate and verify the exact reviewed idempotent SQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import os
+          from urllib.parse import urlsplit, unquote
+          u = urlsplit(os.environ["SUPABASE_DB_URL"])
+          values = {
+              "Host": u.hostname,
+              "Port": u.port or 5432,
+              "Database": unquote(u.path.lstrip("/")),
+              "Username": unquote(u.username or ""),
+              "Password": unquote(u.password or ""),
+              "SSL Mode": "Require",
+              "Trust Server Certificate": "true",
+          }
+          def quote(v):
+              return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+          conn = ";".join(f"{k}={quote(v)}" for k, v in values.items())
+          print("::add-mask::" + conn)
+          print("HABBO_CONNECTIONSTRING=" + conn)
+          PY
+          "$HOME/.dotnet/tools/dotnet-ef" migrations script --idempotent             --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj             --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj             --configuration Release --no-build             --output artifacts/habblover-migrations.sql
+          actual="$(sha256sum artifacts/habblover-migrations.sql | awk '{print $1}')"
+          echo "Generated SQL SHA-256: $actual"
+          if [[ "$actual" != "$EXPECTED_SQL_SHA256" ]]; then
+            echo "::error::Generated SQL differs from the reviewed SQL artifact. No database SQL will be executed."
+            exit 1
+          fi
+
+      - name: Require the exact manual deployment confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${BACKUP_REFERENCE//[[:space:]]/}" ]]; then
+            echo "::error::A backup/export reference is required. No database SQL was executed."
+            exit 1
+          fi
+          required="APPLY HABBLOVER PRODUCTION MIGRATIONS"
+          if [[ "$APPROVAL_PHRASE" != "$required" ]]; then
+            echo "::error::Confirmation phrase did not match. No database SQL was executed."
+            exit 1
+          fi
+          echo "Explicit deployment confirmation accepted."
+          echo "Backup/export reference was supplied (value intentionally withheld from logs)."
+          echo "::notice::The backup reference is a human attestation only; this workflow does not verify that a backup exists or is restorable."
+          echo "::notice::Configure required reviewers for the supabase-production GitHub Environment in repository settings; this approval gate is not created by this YAML file."
+
+      - name: Verify the target database is empty (read-only)
+        shell: bash
+        env:
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          # Treat any application object in public as a non-empty destination.
+          # Includes tables/partitioned tables, views, materialized views, foreign
+          # tables, sequences, routines and standalone user-defined types.
+          object_report="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 <<'SQL'
+          WITH objects AS (
+            SELECT 'relation' AS object_kind, n.nspname || '.' || c.relname AS object_name
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S','c')
+            UNION ALL
+            SELECT CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END,
+                   n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname='public'
+            UNION ALL
+            SELECT CASE t.typtype WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain'
+                        WHEN 'r' THEN 'range' WHEN 'm' THEN 'multirange' ELSE 'custom type' END,
+                   n.nspname || '.' || t.typname
+            FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+            LEFT JOIN pg_class c ON c.oid=t.typrelid
+            WHERE n.nspname='public'
+              AND t.typtype IN ('e','d','r','m')
+              AND t.typname NOT LIKE '\\_%'
+          )
+          SELECT object_kind || ': ' || object_name FROM objects
+          ORDER BY object_kind, object_name;
+          SQL
+          )"
+          history_exists="$(psql "$SUPABASE_DB_URL" --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+            --command="SELECT (to_regclass('public.\"__EFMigrationsHistory\"') IS NOT NULL)::int;")"
+          if [[ -n "${object_report//[[:space:]]/}" || "$history_exists" != "0" ]]; then
+            echo "::error::Destination schema public is not empty; found application objects or EF migration history. No migration SQL was executed."
+            if [[ -n "${object_report//[[:space:]]/}" ]]; then
+              echo "$object_report"
+            fi
+            echo "EF migration history exists: $history_exists"
+            exit 1
+          fi
+          echo "Preflight passed: no public relations, sequences, routines, standalone custom types, or EF migration history found."
+
+      - name: Apply the reviewed idempotent SQL to the official Supabase project
+        shell: bash
+        env:
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          psql "$SUPABASE_DB_URL" --no-psqlrc --set=ON_ERROR_STOP=1             --file=artifacts/habblover-migrations.sql
+
+      - name: Verify all migrations and critical Marketplace constraints
+        shell: bash
+        env:
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          psql "$SUPABASE_DB_URL" --no-psqlrc --set=ON_ERROR_STOP=1 <<'SQL'
+          DO $verify$
+          DECLARE
+            migration_count integer;
+            definition_not_null boolean;
+            definition_default text;
+            definition_fk_count integer;
+          BEGIN
+            SELECT COUNT(*) INTO migration_count FROM public."__EFMigrationsHistory";
+            IF migration_count <> 112 THEN
+              RAISE EXCEPTION 'Expected 112 EF migrations, found %', migration_count;
+            END IF;
+
+            SELECT a.attnotnull INTO definition_not_null
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid=a.attrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='marketplace_offers'
+              AND a.attname='DefinitionId' AND NOT a.attisdropped;
+            IF definition_not_null IS DISTINCT FROM TRUE THEN
+              RAISE EXCEPTION 'marketplace_offers.DefinitionId is not NOT NULL';
+            END IF;
+
+            SELECT column_default INTO definition_default
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='marketplace_offers'
+              AND column_name='DefinitionId';
+            IF definition_default IS NOT NULL THEN
+              RAISE EXCEPTION 'marketplace_offers.DefinitionId unexpectedly has default %', definition_default;
+            END IF;
+
+            SELECT COUNT(*) INTO definition_fk_count
+            FROM pg_constraint con
+            JOIN pg_class source_rel ON source_rel.oid=con.conrelid
+            JOIN pg_namespace source_ns ON source_ns.oid=source_rel.relnamespace
+            JOIN pg_class target_rel ON target_rel.oid=con.confrelid
+            JOIN pg_namespace target_ns ON target_ns.oid=target_rel.relnamespace
+            WHERE source_ns.nspname='public'
+              AND source_rel.relname='marketplace_offers'
+              AND target_ns.nspname='public'
+              AND target_rel.relname='item_definitions'
+              AND con.contype='f'
+              AND con.conkey = ARRAY[
+                (SELECT attnum FROM pg_attribute
+                 WHERE attrelid=source_rel.oid AND attname='DefinitionId' AND NOT attisdropped)
+              ]::smallint[]
+              AND con.confkey = ARRAY[
+                (SELECT attnum FROM pg_attribute
+                 WHERE attrelid=target_rel.oid AND attname='Id' AND NOT attisdropped)
+              ]::smallint[];
+            IF definition_fk_count <> 1 THEN
+              RAISE EXCEPTION 'Expected exactly one DefinitionId -> item_definitions.Id foreign key, found %', definition_fk_count;
+            END IF;
+
+            IF EXISTS (
+              SELECT 1 FROM public.marketplace_offers o
+              LEFT JOIN public.item_definitions d ON d."Id"=o."DefinitionId"
+              WHERE d."Id" IS NULL
+            ) THEN
+              RAISE EXCEPTION 'Marketplace contains orphan DefinitionId values';
+            END IF;
+          END $verify$;
+          SQL
+
+      - name: Upload the exact SQL and deployment evidence
+        if: always() && hashFiles('artifacts/habblover-migrations.sql') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: habblo-supabase-deployment-sql
+          path: artifacts/habblover-migrations.sql
+          if-no-files-found: error
+          retention-days: 30
