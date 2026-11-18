@@ -7,6 +7,7 @@ on:
       - "chore/**"
     paths:
       - ".github/workflows/validate-postgres-migrations.yml"
+      - ".github/workflows/deploy-supabase-migrations.yml"
       - "src/Habbo.Infrastructure/**"
       - "src/Habbo.Host/**"
       - "src/Habbo.Domain/**"
@@ -15,6 +16,7 @@ on:
       - main
     paths:
       - ".github/workflows/validate-postgres-migrations.yml"
+      - ".github/workflows/deploy-supabase-migrations.yml"
       - "src/Habbo.Infrastructure/**"
       - "src/Habbo.Host/**"
       - "src/Habbo.Domain/**"
@@ -24,6 +26,21 @@ permissions:
   contents: read
 
 jobs:
+  validate-deployment-workflow:
+    name: Parse guarded deployment workflow without secrets or database access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Parse deployment workflow YAML
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/deploy-supabase-migrations.yml"); puts "Deployment workflow YAML parsed successfully."'
+
   validate-migrations:
     name: Build and apply migrations to disposable PostgreSQL 17
     runs-on: ubuntu-latest
