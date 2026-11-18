@@ -180,6 +180,35 @@ jobs:
           VALUES (800001, 7001, 'fixture.offer', 10, 0, 1);
           SQL
 
+      - name: Run preflight queries A and E before destructive migrations
+        shell: bash
+        run: |
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT "DefinitionId", "Groupable", COUNT(*) AS item_count
+          FROM user_items GROUP BY "DefinitionId", "Groupable" ORDER BY "DefinitionId", "Groupable";
+          SELECT COUNT(*) AS total_user_items,
+                 COUNT(*) FILTER (WHERE "Groupable" IS TRUE) AS groupable_true,
+                 COUNT(*) FILTER (WHERE "Groupable" IS FALSE) AS groupable_false
+          FROM user_items;
+          SELECT LOWER("Username") AS normalized_username, COUNT(*) AS account_count,
+                 ARRAY_AGG("Username" ORDER BY "Username") AS usernames
+          FROM users GROUP BY LOWER("Username") HAVING COUNT(*) > 1;
+          SQL
+
+      - name: Run preflight query B before UsagePolicy is dropped
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$HOME/.dotnet/tools/dotnet-ef" database update 20260919102416_ItemGroupable --project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --startup-project src/Habbo.Infrastructure/Habbo.Infrastructure.csproj --configuration Release --no-build
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT "UsagePolicy", COUNT(*) AS row_count
+          FROM user_items GROUP BY "UsagePolicy" ORDER BY "UsagePolicy";
+          SELECT COUNT(*) AS total_user_items,
+                 COUNT(*) FILTER (WHERE "UsagePolicy" <> 0) AS nonzero_usage_policy,
+                 COUNT(*) FILTER (WHERE "UsagePolicy" = 0) AS zero_usage_policy
+          FROM user_items;
+          SQL
+
       - name: Create marketplace fixtures before marketplace cleanup migration
         shell: bash
         run: |
@@ -193,6 +222,34 @@ jobs:
             (900001, '10000000-0000-0000-0000-000000000001', 700001, 20, 18, now(), now() + interval '1 day', false),
             (900002, '10000000-0000-0000-0000-000000000001', 700001, 25, 22, now(), now() + interval '1 day', false);
           SQL
+          SELECT 'Marketplace preflight C/G';
+          SELECT o."Id" AS offer_id, o."ItemId"
+          FROM marketplace_offers o LEFT JOIN user_items i ON i."Id" = o."ItemId"
+          WHERE i."Id" IS NULL ORDER BY o."Id";
+          SELECT o."ItemId", COUNT(*) AS open_offer_count, MIN(o."Id") AS kept_offer_id,
+                 ARRAY_AGG(o."Id" ORDER BY o."Id") AS offer_ids
+          FROM marketplace_offers o WHERE o."SoldAt" IS NULL
+          GROUP BY o."ItemId" HAVING COUNT(*) > 1 ORDER BY o."ItemId";
+          SELECT COUNT(*) AS open_duplicate_rows_that_migration_would_delete
+          FROM marketplace_offers o
+          WHERE o."SoldAt" IS NULL AND EXISTS (
+            SELECT 1 FROM marketplace_offers e
+            WHERE e."ItemId" = o."ItemId" AND e."SoldAt" IS NULL AND e."Id" < o."Id");
+          SELECT o."Id" AS offer_id, o."ItemId", i."DefinitionId"
+          FROM marketplace_offers o JOIN user_items i ON i."Id" = o."ItemId"
+          LEFT JOIN item_definitions d ON d."Id" = i."DefinitionId"
+          WHERE d."Id" IS NULL ORDER BY o."Id";
+          SELECT COUNT(*) AS total_offers,
+                 COUNT(*) FILTER (WHERE o."SoldAt" IS NULL) AS unsold_offers,
+                 COUNT(*) FILTER (WHERE o."SoldAt" IS NOT NULL) AS sold_offers,
+                 COUNT(*) FILTER (WHERE i."Id" IS NULL) AS offers_without_matching_item
+          FROM marketplace_offers o LEFT JOIN user_items i ON i."Id" = o."ItemId";
+          SELECT COUNT(*) FILTER (WHERE i."InMarketplace" IS TRUE) AS items_marked_in_marketplace,
+                 COUNT(*) FILTER (WHERE i."InMarketplace" IS FALSE) AS items_not_marked_in_marketplace
+          FROM user_items i;
+          SELECT o."Id" AS offer_id, o."ItemId", i."InMarketplace"
+          FROM marketplace_offers o JOIN user_items i ON i."Id" = o."ItemId"
+          WHERE o."SoldAt" IS NULL AND i."InMarketplace" IS NOT TRUE ORDER BY o."Id";
 
       - name: Create placeholder-gift fixtures before their retirement migration
         shell: bash
@@ -226,6 +283,28 @@ jobs:
           INSERT INTO navigator_quick_links ("TabSearchCode", "SearchCode", "Filter", "Localization", "SortOrder")
           VALUES ('myworld_view', 'fixture_saved_search', '', 'fixture.saved', 1);
           SQL
+          SELECT 'Navigator and category preflight D/F';
+          SELECT "Category", COUNT(*) AS definition_count
+          FROM item_definitions GROUP BY "Category" ORDER BY "Category";
+          SELECT "Category", COUNT(*) AS user_item_count
+          FROM user_items GROUP BY "Category" ORDER BY "Category";
+          SELECT COUNT(*) AS definitions_total,
+                 COUNT(*) FILTER (WHERE "Category" <> 0) AS definitions_nonzero_category
+          FROM item_definitions;
+          SELECT COUNT(*) AS user_items_total,
+                 COUNT(*) FILTER (WHERE "Category" <> 0) AS user_items_nonzero_category
+          FROM user_items;
+          SELECT COUNT(*) AS all_quick_links_to_be_deleted FROM navigator_quick_links;
+          SELECT "TabSearchCode", COUNT(*) AS quick_link_count,
+                 ARRAY_AGG("SearchCode" ORDER BY "SortOrder", "SearchCode") AS quick_links
+          FROM navigator_quick_links GROUP BY "TabSearchCode" ORDER BY "TabSearchCode";
+          SELECT "RequestCode", "BlockCode", COUNT(*) AS row_count
+          FROM navigator_blocks
+          WHERE ("RequestCode", "BlockCode") IN (
+            ('official_view', 'official_view'), ('hotel_view', 'popular'), ('popular', 'popular'),
+            ('myworld_view', 'my_rooms'), ('my_rooms', 'my_rooms'), ('favorites', 'favorites'))
+          GROUP BY "RequestCode", "BlockCode" ORDER BY "RequestCode", "BlockCode";
+          SELECT "SearchCode", "SortOrder" FROM navigator_tabs WHERE "SearchCode" = 'myworld_view';
 
       - name: Apply remaining migrations and assert fixture outcomes
         shell: bash
@@ -282,5 +361,39 @@ jobs:
                ) THEN
               RAISE EXCEPTION 'Orleans clustering tables or function are missing';
             END IF;
-          END $$;
+          END $;
+          SQL
+
+      - name: Verify Marketplace DefinitionId cannot default to zero
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "host=localhost port=5432 dbname=habblo_data_verification user=postgres" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $
+          DECLARE default_expr text;
+          BEGIN
+            SELECT column_default INTO default_expr
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='marketplace_offers' AND column_name='DefinitionId';
+            IF default_expr IS NOT NULL THEN
+              RAISE EXCEPTION 'DefinitionId still has a database default: %', default_expr;
+            END IF;
+
+            BEGIN
+              INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
+              OVERRIDING SYSTEM VALUE
+              VALUES (900003, '10000000-0000-0000-0000-000000000001', NULL, 10, 9, now(), now() + interval '1 day', false);
+              RAISE EXCEPTION 'Offer without DefinitionId unexpectedly succeeded';
+            EXCEPTION WHEN not_null_violation THEN
+              RAISE NOTICE 'PASS: omitted DefinitionId is rejected';
+            END;
+
+            INSERT INTO marketplace_offers ("Id", "SellerId", "ItemId", "DefinitionId", "Price", "Revenue", "CreatedAt", "ExpiresAt", "Redeemed")
+            OVERRIDING SYSTEM VALUE
+            VALUES (900004, '10000000-0000-0000-0000-000000000001', NULL, 7001, 10, 9, now(), now() + interval '1 day', false);
+
+            IF NOT EXISTS (SELECT 1 FROM marketplace_offers WHERE "Id"=900004 AND "DefinitionId"=7001) THEN
+              RAISE EXCEPTION 'Explicit DefinitionId insert was not preserved';
+            END IF;
+          END $;
           SQL
